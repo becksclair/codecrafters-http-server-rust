@@ -1,5 +1,6 @@
 use std::io::prelude::*;
-use std::str;
+use std::path::Path;
+use std::{env, fs, str};
 use std::net::{TcpListener, TcpStream};
 
 fn write_response(mut stream: TcpStream, msg: &str) {
@@ -8,7 +9,7 @@ fn write_response(mut stream: TcpStream, msg: &str) {
     }
 }
 
-fn handle_connection(mut stream: TcpStream) {
+fn handle_connection(mut stream: TcpStream, file_dir: String) {
     // Create a buffer on the stack with a fixed size
     let mut buffer = [0; 512];
 
@@ -40,6 +41,22 @@ fn handle_connection(mut stream: TcpStream) {
                 else if path.starts_with("/user-agent") {
                     format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}", header_ua.len(), header_ua)
                 }
+                else if path.starts_with("/files/") {
+                    let file_str = &path[7..]; // Extract the string after "/files/"
+                    let file_path = [file_dir, file_str.to_string()].concat();
+
+                    // Check the file exists
+                    match Path::new(&file_path).exists() {
+                        true => {
+                            let contents = fs::read_to_string(file_path).expect("Should have been able to read the file");
+                            format!("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\n\r\n{}", contents.len(), contents)
+                        }
+                        false => {
+                            println!("Error file didn't exist.");
+                            "HTTP/1.1 404 Not Found\r\n\r\n".to_string()
+                        }
+                    }
+                }
                 else {
                     match path {
                         "/" => "HTTP/1.1 200 OK\r\n\r\nWelcome to the home page!",
@@ -68,7 +85,8 @@ fn main() {
         match stream {
             Ok(stream) => {
                 println!("accepted new connection");
-                handle_connection(stream);
+                let file_dir = env::args().nth(2).unwrap_or_else(|| "".to_string());
+                handle_connection(stream, file_dir);
             }
             Err(e) => {
                 println!("error: {}", e);
