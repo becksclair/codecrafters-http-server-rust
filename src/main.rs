@@ -3,8 +3,8 @@ use std::str;
 use std::net::{TcpListener, TcpStream};
 
 fn write_response(mut stream: TcpStream, msg: &str) {
-    if let Err(err) = stream.write(msg.as_bytes()) {
-        eprintln!("Fatal error writing from stream: {:?}", err);
+    if let Err(err) = stream.write_all(msg.as_bytes()) {
+        eprintln!("Error writing to stream: {:?}", err);
     }
 }
 
@@ -24,12 +24,23 @@ fn handle_connection(mut stream: TcpStream) {
                 let path = req_parts.next().unwrap_or("");
                 println!("Requested path: {}", path);
 
-                let response = match path {
-                    "/" => "HTTP/1.1 200 OK\r\n\r\n",
-                    _ => "HTTP/1.1 404 Not Found\r\n\r\n",
+                let response = if path.starts_with("/echo/") {
+                    let echo_str = &path[6..]; // Extract the string after "/echo/"
+                    format!(r#"
+                        HTTP/1.1 200 OK\r\n\r\n
+                        Content-Type: text/plain\r\n
+                        Content-Length: {}\r\n\r\n
+                        {}
+                        "#, echo_str.len(), echo_str)
+                }
+                else {
+                    match path {
+                        "/" => "HTTP/1.1 200 OK\r\n\r\nWelcome to the home page!",
+                        _ => "HTTP/1.1 404 Not Found\r\n\r\n",
+                    }.to_string()
                 };
 
-                write_response(stream, response);
+                write_response(stream, &response);
             } else {
                 eprintln!("Error converting buffer to string");
             }
