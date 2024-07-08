@@ -26,12 +26,7 @@ fn handle_connection(mut stream: TcpStream) {
 
                 let response = if path.starts_with("/echo/") {
                     let echo_str = &path[6..]; // Extract the string after "/echo/"
-                    format!(r#"
-                        HTTP/1.1 200 OK\r\n\r\n
-                        Content-Type: text/plain\r\n
-                        Content-Length: {}\r\n\r\n
-                        {}
-                        "#, echo_str.len(), echo_str)
+                    format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}", echo_str.len(), echo_str)
                 }
                 else {
                     match path {
