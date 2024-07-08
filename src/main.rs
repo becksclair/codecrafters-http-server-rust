@@ -16,17 +16,29 @@ fn handle_connection(mut stream: TcpStream) {
         Ok(_) => {
             if let Ok(input_request) = str::from_utf8(&buffer) {
                 let input_request = input_request.trim_end_matches(char::from(0)).to_string();
-                println!("Buffer message: {}", input_request);
 
-                let mut req_parts = input_request.split_whitespace();
-                let _verb = req_parts.next(); // Unused for now
+                let mut req_parts = input_request.split("\r\n");
+                let mut request = req_parts.next().unwrap().split_whitespace();
 
-                let path = req_parts.next().unwrap_or("");
+                let _verb = request.next(); // Unused for now
+                let path = request.next().unwrap_or("");
                 println!("Requested path: {}", path);
+
+                let mut header_ua = String::new();
+                req_parts.for_each(|header| {
+                    if header.starts_with("User-Agent") {
+                        header_ua = header.split_whitespace().last().unwrap_or("").to_string();
+                        println!("Header: {}", header_ua);
+                        return;
+                    }
+                });
 
                 let response = if path.starts_with("/echo/") {
                     let echo_str = &path[6..]; // Extract the string after "/echo/"
                     format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}", echo_str.len(), echo_str)
+                }
+                else if path.starts_with("/user-agent") {
+                    format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}", header_ua.len(), header_ua)
                 }
                 else {
                     match path {
