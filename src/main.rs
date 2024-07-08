@@ -21,18 +21,40 @@ fn handle_connection(mut stream: TcpStream, file_dir: String) {
                 let mut req_parts = input_request.split("\r\n");
                 let mut request = req_parts.next().unwrap().split_whitespace();
 
-                let _verb = request.next(); // Unused for now
+                let verb = request.next().unwrap_or("");
                 let path = request.next().unwrap_or("");
+
+                println!("Verb: {}", verb);
                 println!("Requested path: {}", path);
 
-                let mut header_ua = String::new();
-                req_parts.for_each(|header| {
-                    if header.starts_with("User-Agent") {
-                        header_ua = header.split_whitespace().last().unwrap_or("").to_string();
+                let mut header_ua             = String::new();
+                let mut header_content_length = String::new();
+                let mut header_content_type   = String::new();
+
+                let mut request_body = String::new();
+
+                req_parts.for_each(|part| {
+                    if part.starts_with("User-Agent") {
+                        header_ua = part.split_whitespace().last().unwrap_or("").to_string();
                         println!("Header: {}", header_ua);
                         return;
                     }
+                    if part.starts_with("Content-Length") {
+                        header_content_length = part.split_whitespace().last().unwrap_or("").to_string();
+                        println!("Content-Length: {}", header_content_length);
+                    }
+                    if part.starts_with("Content-Type") {
+                        header_content_type = part.split_whitespace().last().unwrap_or("").to_string();
+                        println!("Content-Type: {}", header_content_type);
+                    }
+
+                    if !part.trim().is_empty() {
+                        request_body = part.to_string();
+                    }
+                    // println!("Part: {}", part);
                 });
+
+                println!("Request Body: {}", request_body);
 
                 let response = if path.starts_with("/echo/") {
                     let echo_str = &path[6..]; // Extract the string after "/echo/"
@@ -45,17 +67,29 @@ fn handle_connection(mut stream: TcpStream, file_dir: String) {
                     let file_str = &path[7..]; // Extract the string after "/files/"
                     let file_path = [file_dir, file_str.to_string()].concat();
 
-                    // Check the file exists
-                    match Path::new(&file_path).exists() {
-                        true => {
-                            let contents = fs::read_to_string(file_path).expect("Should have been able to read the file");
-                            format!("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\n\r\n{}", contents.len(), contents)
+                    // Write file contents
+                    match verb {
+                        "POST" => {
+                            fs::write(file_path, request_body).expect("Should have been able to write the file");
+                            "HTTP/1.1 201 Created\r\n\r\n".to_string()
                         }
-                        false => {
-                            println!("Error file didn't exist.");
-                            "HTTP/1.1 404 Not Found\r\n\r\n".to_string()
+                        "GET" => {
+
+                            // Check the file exists
+                            match Path::new(&file_path).exists() {
+                                true => {
+                                    let contents = fs::read_to_string(file_path).expect("Should have been able to read the file");
+                                    format!("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\n\r\n{}", contents.len(), contents)
+                                }
+                                false => {
+                                    println!("Error file didn't exist.");
+                                    "HTTP/1.1 404 Not Found\r\n\r\n".to_string()
+                                }
+                            }
                         }
+                        _ => "HTTP/1.1 404 Not Found\r\n\r\n".to_string()
                     }
+
                 }
                 else {
                     match path {
