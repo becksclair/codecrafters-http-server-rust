@@ -79,8 +79,18 @@ fn build_response(request: &Request, response_type: ResponseType, response_body:
         },
     }
 
-    if let Some(encoding) = request.headers.iter().find(|(key, val)| key == "accept-encoding" && val == "gzip") {
-        response.push_str(format!("Content-Encoding: {}\r\n", encoding.1).as_str());
+    if let Some(encoding) = request.headers.iter().find(|(key, val)| {
+        key == "accept-encoding" && val.split(',').any(|v| v.trim().to_lowercase() == "gzip")
+    }) {
+        let accepted_encodings = encoding.1.split(',').map(|v| v.trim().to_lowercase()).collect::<Vec<String>>();
+        let valid_encodings = ["gzip", "deflate", "br"];
+        
+        for enc in accepted_encodings.iter() {
+            if valid_encodings.contains(&enc.as_str()) {
+                response.push_str(format!("Content-Encoding: {}\r\n", enc).as_str());
+                println!("Found valid encoding: {}", enc);
+            }
+        }
     }
 
     if let Some(headers) = response_headers {
