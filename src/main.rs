@@ -1,104 +1,182 @@
-use std::io::prelude::*;
+// use std::io::prelude::*;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
 use std::path::Path;
 use std::{env, fs, str};
-use std::net::{TcpListener, TcpStream};
 
-fn write_response(mut stream: TcpStream, msg: &str) {
-    if let Err(err) = stream.write_all(msg.as_bytes()) {
+enum ResponseType {
+    Ok,
+    Created,
+    NotFound,
+    Error
+}
+
+#[derive(Debug, PartialEq)]
+struct Request {
+    method: String,
+    path: String,
+    headers: Vec<(String, String)>,
+    body: Option<String>,
+}
+
+impl Request {
+    fn new(raw_request: &str) -> Request {
+        let clean_request = raw_request.trim_end_matches(char::from(0));
+
+        let mut req_sections = clean_request.lines();
+        let req_line = req_sections.next().unwrap();
+
+        let mut req_parts = req_line.split_whitespace();
+
+        let method  = req_parts.next().unwrap();
+        let path    = req_parts.next().unwrap();
+        // let version = req_parts.next().unwrap();
+
+        let mut body = None;
+        let mut headers = Vec::new();
+
+        while let Some(line) = req_sections.next() {
+            if line.is_empty() {
+                // End of headers, the rest is the body
+                body = Some(req_sections.collect::<Vec<&str>>().join("\n"));
+                break;
+            }
+
+            let (key, value) = line.split_once(": ").unwrap();
+            headers.push((key.to_lowercase().to_string(), value.to_string()));
+        }
+
+        Request {
+            method: method.to_string(),
+            path: path.to_string(),
+            headers,
+            body,
+        }
+    }
+}
+
+async fn write_response(mut stream: TcpStream, msg: &str) {
+    if let Err(err) = stream.write_all(msg.as_bytes()).await {
         eprintln!("Error writing to stream: {:?}", err);
     }
 }
 
-fn handle_connection(mut stream: TcpStream, file_dir: String) {
+fn build_response(request: &Request, response_type: ResponseType, response_body: Option<String>, response_headers: Option<Vec<(String, String)>>) -> String {
+    let mut response = String::new();
+
+    match response_type {
+        ResponseType::Ok => {
+            response.push_str("HTTP/1.1 200 OK\r\n");
+        },
+        ResponseType::Created => {
+            response.push_str("HTTP/1.1 201 Created\r\n");
+        },
+        ResponseType::NotFound => {
+            response.push_str("HTTP/1.1 404 Not Found\r\n");
+        },
+        ResponseType::Error => {
+            response.push_str("HTTP/1.1 500 Internal Server Error\r\n");
+        },
+    }
+
+    if let Some(encoding) = request.headers.iter().find(|(key, val)| key == "accept-encoding" && val == "gzip") {
+        response.push_str(format!("Content-Encoding: {}\r\n", encoding.1).as_str());
+    }
+
+    if let Some(headers) = response_headers {
+        for (key, value) in headers {
+            response.push_str(&key);
+            response.push_str(": ");
+            response.push_str(&value);
+            response.push_str("\r\n");
+        }
+    }
+
+    if let Some(body) = response_body {
+        println!("Body: {}", body);
+        println!("Body Length: {}", body.len());
+
+        response.push_str("Content-Type: text/plain\r\n");
+        response.push_str("Content-Length: ");
+        response.push_str(&body.len().to_string());
+        response.push_str("\r\n\r\n");
+        response.push_str(&body);
+    }
+    else {
+        response.push_str("\r\n");
+    }
+    response
+}
+
+async fn handle_connection(mut stream: TcpStream, file_dir: String) {
     // Create a buffer on the stack with a fixed size
     let mut buffer = [0; 512];
 
-    match stream.read(&mut buffer) {
-        Ok(_) => {
+    match stream.read(&mut buffer).await {
+        Ok(bytes_read) => {
+            if bytes_read == 0 {
+                // Connection was closed
+                println!("Connection was closed");
+                return;
+            }
+            println!("Bytes read: {}", bytes_read);
+
             if let Ok(input_request) = str::from_utf8(&buffer) {
-                let input_request = input_request.trim_end_matches(char::from(0)).to_string();
+                let request = Request::new(input_request);
 
-                let mut req_parts = input_request.split("\r\n");
-                let mut request = req_parts.next().unwrap().split_whitespace();
-
-                let verb = request.next().unwrap_or("");
-                let path = request.next().unwrap_or("");
-
-                println!("Verb: {}", verb);
-                println!("Requested path: {}", path);
-
-                let mut header_ua             = String::new();
-                let mut header_content_length = String::new();
-                let mut header_content_type   = String::new();
-
-                let mut request_body = String::new();
-
-                req_parts.for_each(|part| {
-                    if part.starts_with("User-Agent") {
-                        header_ua = part.split_whitespace().last().unwrap_or("").to_string();
-                        println!("Header: {}", header_ua);
-                        return;
+                let response =
+                    if request.path.starts_with("/echo/") {
+                        let echo_str = &request.path[6..]; // Extract the string after "/echo/"
+                        build_response(&request, ResponseType::Ok, Some(echo_str.to_string()), None)
                     }
-                    if part.starts_with("Content-Length") {
-                        header_content_length = part.split_whitespace().last().unwrap_or("").to_string();
-                        println!("Content-Length: {}", header_content_length);
-                    }
-                    if part.starts_with("Content-Type") {
-                        header_content_type = part.split_whitespace().last().unwrap_or("").to_string();
-                        println!("Content-Type: {}", header_content_type);
-                    }
+                    else if request.path.starts_with("/user-agent") {
+                        let ua_header = request.headers.iter().find(|(key, _)| key == "user-agent");
 
-                    if !part.trim().is_empty() {
-                        request_body = part.to_string();
-                    }
-                    // println!("Part: {}", part);
-                });
-
-                println!("Request Body: {}", request_body);
-
-                let response = if path.starts_with("/echo/") {
-                    let echo_str = &path[6..]; // Extract the string after "/echo/"
-                    format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}", echo_str.len(), echo_str)
-                }
-                else if path.starts_with("/user-agent") {
-                    format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}", header_ua.len(), header_ua)
-                }
-                else if path.starts_with("/files/") {
-                    let file_str = &path[7..]; // Extract the string after "/files/"
-                    let file_path = [file_dir, file_str.to_string()].concat();
-
-                    // Write file contents
-                    match verb {
-                        "POST" => {
-                            fs::write(file_path, request_body).expect("Should have been able to write the file");
-                            "HTTP/1.1 201 Created\r\n\r\n".to_string()
+                        match ua_header {
+                            Some((_, ua)) => {
+                                build_response(&request, ResponseType::Ok, Some(ua.to_string()), None)
+                            },
+                            None => {
+                                build_response(&request, ResponseType::Error, None, None)
+                            },
                         }
-                        "GET" => {
-
-                            // Check the file exists
-                            match Path::new(&file_path).exists() {
-                                true => {
-                                    let contents = fs::read_to_string(file_path).expect("Should have been able to read the file");
-                                    format!("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\n\r\n{}", contents.len(), contents)
-                                }
-                                false => {
-                                    println!("Error file didn't exist.");
-                                    "HTTP/1.1 404 Not Found\r\n\r\n".to_string()
+                    }
+                    else if request.path.starts_with("/files/") {
+                        let file_str = &request.path[7..]; // Extract the string after "/files/"
+                        let file_path = [file_dir, file_str.to_string()].concat();
+                    
+                        // Write file contents
+                        match request.method.as_str() {
+                            "POST" => {
+                                fs::write(file_path, request.body.as_ref().unwrap()).expect("Should have been able to write the file");
+                                build_response(&request, ResponseType::Created, None, None)
+                            }
+                            "GET" => {
+                                // Check the file exists
+                                match Path::new(&file_path).exists() {
+                                    true => {
+                                        let contents = fs::read_to_string(file_path).expect("Should have been able to read the file");
+                                        let response_headers = vec![("Content-Type".to_string(), "application/octet-stream".to_string())];
+                                        build_response(&request, ResponseType::Ok, Some(contents), Some(response_headers))
+                                    }
+                                    false => {
+                                        println!("Error file didn't exist.");
+                                        build_response(&request, ResponseType::NotFound, None, None)
+                                    }
                                 }
                             }
+                            _ => build_response(&request, ResponseType::NotFound, None, None),
                         }
-                        _ => "HTTP/1.1 404 Not Found\r\n\r\n".to_string()
                     }
-
-                }
                 else {
-                    match path {
-                        "/" => "HTTP/1.1 200 OK\r\n\r\nWelcome to the home page!",
-                        _ => "HTTP/1.1 404 Not Found\r\n\r\n",
-                    }.to_string()
+                    match request.path.as_str() {
+                        "/" => build_response(&request, ResponseType::Ok, Some("Welcome to the home page!".to_string()), None),
+                        _ => build_response(&request, ResponseType::NotFound, None, None),
+                    }
+                    .to_string()
                 };
 
-                write_response(stream, &response);
+                write_response(stream, &response).await;
             } else {
                 eprintln!("Error converting buffer to string");
             }
@@ -109,22 +187,56 @@ fn handle_connection(mut stream: TcpStream, file_dir: String) {
     }
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     // You can use print statements as follows for debugging, they'll be visible when running tests.
     println!("Logs from your program will appear here!");
 
-    let listener = TcpListener::bind("127.0.0.1:4221").unwrap();
-
-    for stream in listener.incoming() {
-        match stream {
-            Ok(stream) => {
+    let listener = TcpListener::bind("127.0.0.1:4221").await.unwrap();
+    loop {
+        match listener.accept().await {
+            Ok((stream, _)) => {
                 println!("accepted new connection");
-                let file_dir = env::args().nth(2).unwrap_or_else(|| "".to_string());
-                handle_connection(stream, file_dir);
+                let file_dir = env::args().nth(2).unwrap_or_default();
+                tokio::spawn(async move {
+                    handle_connection(stream, file_dir).await;
+                });
             }
             Err(e) => {
                 println!("error: {}", e);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pretty_assertions::assert_eq;
+
+    #[test]
+    fn test_request() {
+        let raw_request =
+            "GET /echo/hello HTTP/1.1\r\nUser-Agent: curl/7.83.1\r\nAccept: */*\r\n\r\n";
+        let request = Request::new(raw_request);
+
+        assert_eq!(request.method, "GET");
+        assert_eq!(request.path, "/echo/hello");
+    }
+
+    #[test]
+    fn test_response_ok() {
+        let request = Request::new("GET /echo/hello HTTP/1.1\r\nUser-Agent: curl/7.83.1\r\nAccept: */*\r\n\r\n");
+        let content = "Welcome to the home page!";
+        let response = build_response(&request, ResponseType::Ok, Some(content.to_string()), None);      
+
+        assert_eq!(response, format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}\r\n", content.len().to_string(), content));
+    }
+
+    #[test]
+    fn test_response_not_found() {
+        let request = Request::new("GET /echo/hello HTTP/1.1\r\nUser-Agent: curl/7.83.1\r\nAccept: */*\r\n\r\n");
+        let response = build_response(&request, ResponseType::NotFound, None, None);      
+        assert_eq!(response, "HTTP/1.1 404 Not Found\r\n\r\n");
     }
 }
