@@ -1,8 +1,11 @@
-// use std::io::prelude::*;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use std::path::Path;
+use std::sync::Arc;
 use std::{env, fs, str};
+use std::io::Write;
+use flate2::Compression;
+use flate2::write::GzEncoder;
 
 enum ResponseType {
     Ok,
@@ -55,14 +58,16 @@ impl Request {
     }
 }
 
-async fn write_response(mut stream: TcpStream, msg: &str) {
-    if let Err(err) = stream.write_all(msg.as_bytes()).await {
+async fn write_response_bytes(mut stream: TcpStream, msg: Arc<Vec<u8>>) {
+    if let Err(err) = stream.write_all(&msg).await {
         eprintln!("Error writing to stream: {:?}", err);
     }
 }
 
-fn build_response(request: &Request, response_type: ResponseType, response_body: Option<String>, response_headers: Option<Vec<(String, String)>>) -> String {
+fn build_response(request: &Request, response_type: ResponseType, response_body: Option<String>, response_headers: Option<Vec<(String, String)>>) -> Arc<Vec<u8>> {
+    let mut compress_body = false;
     let mut response = String::new();
+    let mut compressed_body: Vec<u8> = Vec::new();
 
     match response_type {
         ResponseType::Ok => {
@@ -87,6 +92,7 @@ fn build_response(request: &Request, response_type: ResponseType, response_body:
         
         for enc in accepted_encodings.iter() {
             if valid_encodings.contains(&enc.as_str()) {
+                compress_body = true;
                 response.push_str(format!("Content-Encoding: {}\r\n", enc).as_str());
                 println!("Found valid encoding: {}", enc);
             }
@@ -107,15 +113,31 @@ fn build_response(request: &Request, response_type: ResponseType, response_body:
         println!("Body Length: {}", body.len());
 
         response.push_str("Content-Type: text/plain\r\n");
-        response.push_str("Content-Length: ");
-        response.push_str(&body.len().to_string());
-        response.push_str("\r\n\r\n");
-        response.push_str(&body);
+
+        // Compress the body with gzip if needed
+        if compress_body {
+            let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+            encoder.write_all(body.as_bytes()).unwrap();
+            compressed_body = encoder.finish().unwrap();
+
+            let cbody_len = compressed_body.len();
+        
+            println!("Compressed body length: {}", cbody_len);
+            println!("{:X?}", compressed_body);
+
+            response.push_str(&format!("Content-Length: {}\r\n\r\n", cbody_len));
+        }
+        else {
+            response.push_str(&format!("Content-Length: {}\r\n\r\n", body.len()));
+            response.push_str(&body);
+        }
     }
     else {
+        // If there's no body, we still need to end the headers with a blank line
         response.push_str("\r\n");
     }
-    response
+
+    Arc::new([response.into_bytes(), compressed_body].concat())
 }
 
 async fn handle_connection(mut stream: TcpStream, file_dir: String) {
@@ -183,10 +205,9 @@ async fn handle_connection(mut stream: TcpStream, file_dir: String) {
                         "/" => build_response(&request, ResponseType::Ok, Some("Welcome to the home page!".to_string()), None),
                         _ => build_response(&request, ResponseType::NotFound, None, None),
                     }
-                    .to_string()
                 };
 
-                write_response(stream, &response).await;
+                write_response_bytes(stream, response).await;
             } else {
                 eprintln!("Error converting buffer to string");
             }
@@ -240,13 +261,13 @@ mod tests {
         let content = "Welcome to the home page!";
         let response = build_response(&request, ResponseType::Ok, Some(content.to_string()), None);      
 
-        assert_eq!(response, format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}\r\n", content.len().to_string(), content));
+        assert_eq!(str::from_utf8(&response).unwrap(), format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}\r\n", content.len().to_string(), content));
     }
 
     #[test]
     fn test_response_not_found() {
         let request = Request::new("GET /echo/hello HTTP/1.1\r\nUser-Agent: curl/7.83.1\r\nAccept: */*\r\n\r\n");
         let response = build_response(&request, ResponseType::NotFound, None, None);      
-        assert_eq!(response, "HTTP/1.1 404 Not Found\r\n\r\n");
+        assert_eq!(str::from_utf8(&response).unwrap(), "HTTP/1.1 404 Not Found\r\n\r\n");
     }
 }
